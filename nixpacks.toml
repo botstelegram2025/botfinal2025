@@ -1,0 +1,23 @@
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
+NIXPACKS_NODE_VERSION = "20"
+RAILWAY_ENVIRONMENT_NAME = "production"
+WHATSAPP_SERVICE_URL = "http://127.0.0.1:3001"
+NODE_ENV = "production"
+PYTHONUNBUFFERED = "1"
+
+[phases.setup]
+dependsOn = ["install"]
+
+[phases.install]
+cmds = [
+    "apt-get update && apt-get install -y curl",
+    "pip install .",
+    "npm install"
+]
+
+[phases.build]
+cmds = ["echo 'Build completed'"]
+
+[start]
+cmd = "python start_railway.py"
