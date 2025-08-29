@@ -50,7 +50,7 @@ class ConnectionSemaphore {
     }
 }
 
-const connectionSemaphore = new ConnectionSemaphore(2); // Max 2 conexões simultâneas
+const connectionSemaphore = new ConnectionSemaphore(1000); // Max 1000 conexões simultâneas
 
 // Estrutura de dados para cada sessão de usuário
 class UserWhatsAppSession {
