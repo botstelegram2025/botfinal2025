@@ -1,59 +1,53 @@
 #!/bin/bash
+set -euo pipefail
 
-# Script de inicialização para Railway
-# Inicia ambos os serviços: Telegram Bot e WhatsApp Server
+echo "🚀 Iniciando BOT (sem WhatsApp local)…"
 
-echo "🚀 Iniciando serviços no Railway..."
+# --- Configurações recomendadas para logs no Railway ---
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+export TZ="${TZ:-America/Sao_Paulo}"
 
-# Verificar se as dependências estão instaladas
-echo "📦 Verificando dependências Python..."
-pip install -q -r requirements.txt
+# --- Pré-checagens de ambiente ---
 
-echo "📦 Verificando dependências Node.js..."
-npm install --silent
+# 1) WhatsApp Service externo obrigatório
+if ! python - << 'PY'
+import os, sys
+url = os.getenv("WHATSAPP_SERVICE_URL", "").strip()
+if not url:
+    print("ERRO: WHATSAPP_SERVICE_URL não definido.", file=sys.stderr)
+    sys.exit(2)
+print("OK")
+PY
+then
+  echo "❌ WHATSAPP_SERVICE_URL não está configurado. Defina a URL do serviço WhatsApp externo (ex.: https://seuservico.railway.app)."
+  exit 2
+fi
 
-# Iniciar o servidor WhatsApp em background
-echo "📱 Iniciando servidor WhatsApp Baileys..."
-node whatsapp_baileys_multi.js &
-WHATSAPP_PID=$!
+# 2) (Opcional) Mostra se token está setado (sem vazar valor)
+if [ -n "${WHATSAPP_API_TOKEN:-}" ]; then
+  echo "🔐 WHATSAPP_API_TOKEN definido"
+fi
+if [ -n "${WHATSAPP_SESSION_ID:-}" ]; then
+  echo "🪪 WHATSAPP_SESSION_ID=${WHATSAPP_SESSION_ID}"
+fi
 
-# Aguardar alguns segundos para o servidor WhatsApp inicializar
-sleep 5
+# 3) (Opcional) Tenta pingar /status só para log informativo (não bloqueante)
+if command -v curl >/dev/null 2>&1; then
+  echo "🩺 Verificando WhatsApp Service em ${WHATSAPP_SERVICE_URL}/status (best-effort)…"
+  if [ -n "${WHATSAPP_API_TOKEN:-}" ]; then
+    curl -fsS -H "x-api-token: ${WHATSAPP_API_TOKEN}" "${WHATSAPP_SERVICE_URL%/}/status" || true
+  else
+    curl -fsS "${WHATSAPP_SERVICE_URL%/}/status" || true
+  fi
+else
+  echo "ℹ️ curl não disponível; pulando verificação HTTP."
+fi
 
-# Iniciar o bot Telegram
-echo "🤖 Iniciando bot Telegram..."
-python main.py &
-TELEGRAM_PID=$!
+# --- IMPORTANTE ---
+# Não instalamos dependências aqui. Instale tudo no build (Dockerfile ou Nixpacks).
+# Nada de 'npm install' ou 'node whatsapp_baileys_multi.js' neste serviço.
 
-# Função para cleanup em caso de encerramento
-cleanup() {
-    echo "🛑 Encerrando serviços..."
-    kill $WHATSAPP_PID 2>/dev/null
-    kill $TELEGRAM_PID 2>/dev/null
-    exit 0
-}
-
-# Capturar sinais de encerramento
-trap cleanup SIGTERM SIGINT
-
-echo "✅ Ambos os serviços estão rodando"
-echo "WhatsApp Server PID: $WHATSAPP_PID"
-echo "Telegram Bot PID: $TELEGRAM_PID"
-
-# Manter o script ativo e monitorar os processos
-while true; do
-    # Verificar se os processos ainda estão rodando
-    if ! kill -0 $WHATSAPP_PID 2>/dev/null; then
-        echo "⚠️ Servidor WhatsApp parou, reiniciando..."
-        node whatsapp_baileys_multi.js &
-        WHATSAPP_PID=$!
-    fi
-    
-    if ! kill -0 $TELEGRAM_PID 2>/dev/null; then
-        echo "⚠️ Bot Telegram parou, reiniciando..."
-        python main.py &
-        TELEGRAM_PID=$!
-    fi
-    
-    sleep 30
-done
+echo "🤖 Iniciando Telegram bot…"
+# Use exec para que o processo do bot seja o PID 1 (boas práticas em containers)
+exec python main.py
