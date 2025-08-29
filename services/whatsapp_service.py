@@ -1,472 +1,151 @@
-import requests
+# services/whatsapp_service.py
+import os
+import time
 import logging
-from typing import Dict, Any
+from typing import Optional, Dict, Any
+import requests
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TIMEOUT = (5, 20)  # (connect, read) segundos
+POLL_TOTAL_TIME = 25       # total de tempo para polling de QR
+POLL_INTERVAL = 2          # intervalo entre polls (s)
+
 class WhatsAppService:
     def __init__(self):
-        # Support Railway environment with internal service communication
-        import os
-        
-        # Check for Railway environment variables
-        railway_environment = os.getenv('RAILWAY_ENVIRONMENT_NAME')
-        whatsapp_url = os.getenv('WHATSAPP_SERVICE_URL')
-        
-        if whatsapp_url:
-            # Use explicit WhatsApp service URL if provided
-            self.baileys_url = whatsapp_url
-        elif railway_environment:
-            # Railway environment - services communicate internally via localhost
-            self.baileys_url = "http://baileys-local-persist.railway.internal:3000"
-        else:
-            # Local development
-            self.baileys_url = "http://baileys-local-persist.railway.internal:3000"
-        
-        self.headers = {
-            'Content-Type': 'application/json'
-        }
-        logger.info(f"WhatsApp Service initialized with URL: {self.baileys_url}")
-    
-    def send_message(self, phone_number: str, message: str, user_id: int) -> Dict[str, Any]:
-        """
-        Send WhatsApp message via Baileys with auto-recovery
-        """
-        try:
-            # Format phone number (remove non-digits and ensure country code)
-            clean_phone = ''.join(filter(str.isdigit, phone_number))
-            if not clean_phone.startswith('55'):
-                clean_phone = '55' + clean_phone
-            
-            # Prepare payload for Baileys
-            payload = {
-                'number': clean_phone,
-                'message': message
-            }
-            
-            # Send to local Baileys server with user isolation
-            url = f"{self.baileys_url}/send/{user_id}"
-            
-            logger.info(f"Sending WhatsApp message to {clean_phone}")
-            
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=45  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    logger.info(f"WhatsApp message sent successfully to {clean_phone}")
-                    return {
-                        'success': True,
-                        'message_id': result.get('messageId'),
-                        'response': result
-                    }
-                else:
-                    error_msg = result.get('error', 'Unknown error')
-                    logger.error(f"Failed to send WhatsApp message: {error_msg}")
-                    
-                    # Try to restore session if WhatsApp not connected
-                    if 'não conectado' in error_msg.lower() or 'not connected' in error_msg.lower():
-                        logger.info(f"Attempting to restore WhatsApp session for user {user_id}")
-                        restore_result = self.restore_session(user_id)
-                        if restore_result.get('success'):
-                            logger.info(f"Session restore initiated for user {user_id}")
-                        
-                    return {
-                        'success': False,
-                        'error': error_msg,
-                        'details': result
-                    }
-            else:
-                logger.error(f"Failed to send WhatsApp message: {response.status_code} - {response.text}")
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except requests.exceptions.Timeout:
-            logger.error("WhatsApp API timeout")
-            return {
-                'success': False,
-                'error': 'Timeout',
-                'details': 'API request timed out'
-            }
-        except requests.exceptions.RequestException as e:
-            logger.error(f"WhatsApp API request error: {e}")
-            return {
-                'success': False,
-                'error': 'Request failed',
-                'details': str(e)
-            }
-        except Exception as e:
-            logger.error(f"Unexpected error sending WhatsApp message: {e}")
-            return {
-                'success': False,
-                'error': 'Unexpected error',
-                'details': str(e)
-            }
-    
-    def restore_session(self, user_id: int) -> Dict[str, Any]:
-        """
-        Attempt to restore WhatsApp session for user
-        """
-        try:
-            url = f"{self.baileys_url}/restore/{user_id}"
-            
-            response = requests.post(
-                url,
-                headers=self.headers,
-                timeout=30  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"Session restore response for user {user_id}: {result}")
-                return result
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error restoring WhatsApp session for user {user_id}: {e}")
-            return {
-                'success': False,
-                'error': 'Restore failed',
-                'details': str(e)
-            }
-    
-    def get_health_status(self) -> Dict[str, Any]:
-        """
-        Get health status of WhatsApp server
-        """
-        try:
-            url = f"{self.baileys_url}/health"
-            
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error getting WhatsApp health status: {e}")
-            return {
-                'success': False,
-                'error': 'Health check failed',
-                'details': str(e)
-            }
-    
-    def check_instance_status(self, user_id: int) -> Dict[str, Any]:
-        """
-        Check if WhatsApp instance is connected and ready
-        """
-        try:
-            url = f"{self.baileys_url}/status/{user_id}"
-            
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                
-                # Check if the status indicates a real connection issue
-                state = result.get('state', 'unknown')
-                connected = result.get('connected', False)
-                
-                # Log connection status for debugging
-                if connected:
-                    logger.info(f"WhatsApp status for user {user_id}: connected={connected}, state={state}")
-                else:
-                    logger.warning(f"WhatsApp status for user {user_id}: connected={connected}, state={state}")
-                
-                return {
-                    'success': True,
-                    'connected': connected,
-                    'state': state,
-                    'qrCode': result.get('qrCode'),  # ✅ Match the key name exactly
-                    'response': result
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except requests.exceptions.ConnectionError:
-            logger.error("Baileys server not running")
-            return {
-                'success': False,
-                'error': 'Baileys server not running',
-                'details': 'Please start the Baileys server on port 3001'
-            }
-        except Exception as e:
-            logger.error(f"Error checking WhatsApp instance status: {e}")
-            return {
-                'success': False,
-                'error': 'Status check failed',
-                'details': str(e)
-            }
-    
-    def request_pairing_code(self, user_id: int, phone_number: str) -> Dict[str, Any]:
-        """
-        Request pairing code for WhatsApp connection
-        """
-        try:
-            url = f"{self.baileys_url}/pairing-code/{user_id}"
-            
-            payload = {
-                'phoneNumber': phone_number
-            }
-            
-            logger.info(f"Requesting pairing code for user {user_id} with phone {phone_number}")
-            
-            response = requests.post(
-                url,
-                json=payload,
-                headers=self.headers,
-                timeout=45  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    logger.info(f"Pairing code generated successfully for user {user_id}")
-                    return {
-                        'success': True,
-                        'pairing_code': result.get('pairingCode'),
-                        'response': result
-                    }
-                else:
-                    error_msg = result.get('error', 'Unknown error')
-                    logger.error(f"Failed to generate pairing code: {error_msg}")
-                    return {
-                        'success': False,
-                        'error': error_msg,
-                        'details': result
-                    }
-            else:
-                logger.error(f"Failed to request pairing code: {response.status_code} - {response.text}")
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except requests.exceptions.Timeout:
-            logger.error("Timeout requesting pairing code")
-            return {
-                'success': False,
-                'error': 'Timeout requesting pairing code'
-            }
-        except Exception as e:
-            logger.error(f"Error requesting pairing code for user {user_id}: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def get_pairing_code(self, user_id: int) -> Dict[str, Any]:
-        """
-        Get existing pairing code if available
-        """
-        try:
-            url = f"{self.baileys_url}/pairing-code/{user_id}"
-            
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result
-            else:
-                logger.error(f"Failed to get pairing code: {response.status_code} - {response.text}")
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error getting pairing code for user {user_id}: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def get_qr_code(self, user_id: int) -> Dict[str, Any]:
-        """
-        Get QR code for WhatsApp connection - Uses status endpoint
-        """
-        try:
-            # Use status endpoint instead of non-existent /qr endpoint
-            url = f"{self.baileys_url}/status/{user_id}"
-            
-            response = requests.get(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                # Extract QR code from status response
-                if result.get('success') and result.get('qrCode'):
-                    return {
-                        'success': True,
-                        'qrCode': result.get('qrCode'),
-                        'state': result.get('state'),
-                        'connected': result.get('connected')
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': 'QR Code not available in status',
-                        'details': result
-                    }
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error getting QR code: {e}")
-            return {
-                'success': False,
-                'error': 'QR code fetch failed',
-                'details': str(e)
-            }
-    
-    def disconnect_whatsapp(self, user_id: int) -> Dict[str, Any]:
-        """
-        Disconnect WhatsApp
-        """
-        try:
-            url = f"{self.baileys_url}/disconnect/{user_id}"
-            
-            response = requests.post(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error disconnecting WhatsApp: {e}")
-            return {
-                'success': False,
-                'error': 'Disconnect failed',
-                'details': str(e)
-            }
-    
-    def reconnect_whatsapp(self, user_id: int) -> Dict[str, Any]:
-        """
-        Reconnect WhatsApp
-        """
-        try:
-            url = f"{self.baileys_url}/reconnect/{user_id}"
-            
-            response = requests.post(
-                url,
-                headers=self.headers,
-                timeout=20  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error reconnecting WhatsApp: {e}")
-            return {
-                'success': False,
-                'error': 'Reconnect failed',
-                'details': str(e)
-            }
-    
-    def force_new_qr(self, user_id: int) -> Dict[str, Any]:
-        """
-        Force generate a new QR code - GUARANTEED to work
-        """
-        try:
-            url = f"{self.baileys_url}/force-qr/{user_id}"
-            
-            response = requests.post(
-                url,
-                headers=self.headers,
-                timeout=45  # Railway optimized timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result
-            else:
-                return {
-                    'success': False,
-                    'error': f"HTTP Error: {response.status_code}",
-                    'details': response.text
-                }
-                
-        except Exception as e:
-            logger.error(f"Error forcing QR code: {e}")
-            return {
-                'success': False,
-                'error': 'Force QR failed',
-                'details': str(e)
-            }
-    
-    def format_message(self, template: str, **kwargs) -> str:
-        """
-        Format message template with provided variables
-        """
-        try:
-            return template.format(**kwargs)
-        except KeyError as e:
-            logger.error(f"Missing template variable: {e}")
-            return template
-        except Exception as e:
-            logger.error(f"Error formatting message template: {e}")
-            return template
+        base = os.getenv("WHATSAPP_SERVICE_URL", "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("WHATSAPP_SERVICE_URL não definido")
+        # NUNCA anexe :3000 aqui — Railway já serve na porta padrão (443/80)
+        self.base_url = base
 
-# Global WhatsApp service instance
+        self.api_token = os.getenv("WHATSAPP_API_TOKEN", "").strip() or None
+        self.session_id = os.getenv("WHATSAPP_SESSION_ID", "").strip() or None
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self.api_token:
+            h["x-api-token"] = self.api_token
+        return h
+
+    def _url(self, path: str) -> str:
+        path = path if path.startswith("/") else f"/{path}"
+        return f"{self.base_url}{path}"
+
+    def status(self) -> Dict[str, Any]:
+        params = {}
+        if self.session_id:
+            params["sessionId"] = self.session_id
+        try:
+            r = requests.get(self._url("/status"), headers=self._headers(), params=params, timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status()
+            return {"success": True, "data": r.json()}
+        except Exception as e:
+            logger.error(f"WhatsApp status error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_qr(self) -> Dict[str, Any]:
+        params = {}
+        if self.session_id:
+            params["sessionId"] = self.session_id
+        try:
+            r = requests.get(self._url("/qr"), headers=self._headers(), params=params, timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            # formatos comuns: {"ok":true,"qr":"..."} ou {"qr":"..."} ou {"data":{"qr":"..."}}
+            qr = data.get("qr") or (data.get("data") or {}).get("qr")
+            if qr:
+                return {"success": True, "qr": qr, "raw": data}
+            return {"success": False, "error": "No QR in response", "raw": data}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _try_post(self, path: str, json: Optional[dict] = None, params: Optional[dict] = None) -> Optional[requests.Response]:
+        try:
+            r = requests.post(self._url(path), headers=self._headers(), json=json, params=params, timeout=DEFAULT_TIMEOUT)
+            if 200 <= r.status_code < 300:
+                return r
+            logger.warning(f"POST {path} -> {r.status_code} {r.text[:180]}")
+            return None
+        except Exception as e:
+            logger.warning(f"POST {path} failed: {e}")
+            return None
+
+    def reconnect(self) -> Dict[str, Any]:
+        # Alguns serviços usam /reconnect, outros /restart
+        params = {}
+        if self.session_id:
+            params["sessionId"] = self.session_id
+
+        tried = []
+
+        for path in ("/reconnect", "/restart"):
+            tried.append(path)
+            res = self._try_post(path, params=params)
+            if res is not None:
+                try:
+                    return {"success": True, "data": res.json()}
+                except Exception:
+                    return {"success": True, "data": {"status": "ok"}}
+
+        return {"success": False, "error": f"No reconnect endpoint worked. Tried: {', '.join(tried)}"}
+
+    def force_qr(self) -> Dict[str, Any]:
+        """
+        Fluxo robusto:
+        1) Tenta endpoints de forçar QR (variações).
+        2) Em seguida, faz polling de /qr até vir um código (ou timeout).
+        """
+        params = {}
+        if self.session_id:
+            params["sessionId"] = self.session_id
+
+        # 1) Tentar variações de "force"
+        variants = [
+            ("/force-qr", None),
+            ("/force-qr/{}".format(self.session_id), None) if self.session_id else None,
+            ("/qr/force", None),
+        ]
+        variants = [v for v in variants if v]
+
+        forced = False
+        tried = []
+        for path, body in variants:
+            tried.append(path)
+            res = self._try_post(path, json=body, params=params)
+            if res is not None:
+                forced = True
+                break
+
+        if not forced:
+            # Se não tem endpoint de force, tenta pelo menos reconectar
+            rec = self.reconnect()
+            if not rec.get("success"):
+                return {"success": False, "error": f"Force QR failed and reconnect failed: {rec.get('error')}",
+                        "details": {"tried": tried}}
+
+        # 2) Polling de /qr
+        started = time.time()
+        while time.time() - started < POLL_TOTAL_TIME:
+            qr = self.get_qr()
+            if qr.get("success") and qr.get("qr"):
+                return {"success": True, "qr": qr["qr"], "raw": qr.get("raw")}
+            time.sleep(POLL_INTERVAL)
+
+        return {"success": False, "error": "QR polling timeout"}
+
+    def send_message(self, phone: str, message: str) -> Dict[str, Any]:
+        payload = {"phone": phone, "message": message}
+        if self.session_id:
+            payload["sessionId"] = self.session_id
+        try:
+            r = requests.post(self._url("/send"), headers=self._headers(), json=payload, timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            ok = bool(data.get("ok") or data.get("success"))
+            return {"success": ok, "data": data, "error": None if ok else data}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+# Instância singleton
 whatsapp_service = WhatsAppService()
