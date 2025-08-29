@@ -18,10 +18,10 @@ class WhatsAppService:
             self.baileys_url = whatsapp_url
         elif railway_environment:
             # Railway environment - services communicate internally via localhost
-            self.baileys_url = "http://127.0.0.1:3001"
+            self.baileys_url = "http://baileys-local-persist.railway.internal:3000"
         else:
             # Local development
-            self.baileys_url = "http://localhost:3001"
+            self.baileys_url = "http://baileys-local-persist.railway.internal:3000"
         
         self.headers = {
             'Content-Type': 'application/json'
