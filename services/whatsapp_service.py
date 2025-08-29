@@ -1,8 +1,6 @@
 # services/whatsapp_service.py
-
 import os
 import time
-import json
 import logging
 from typing import Dict, Any, Optional
 
@@ -14,22 +12,23 @@ logger = logging.getLogger(__name__)
 class WhatsAppService:
     def __init__(self):
         """
-        Inicializa o cliente para o gateway Baileys (WhatsApp).
-        Prioriza WHATSAPP_SERVICE_URL; em Railway, se não vier, usa localhost:3001.
+        Cliente do gateway Baileys (WhatsApp).
+        Prioriza WHATSAPP_SERVICE_URL; em Railway, se ausente, usa http://127.0.0.1:3001.
         """
-        railway_environment = os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        railway_env = os.getenv("RAILWAY_ENVIRONMENT_NAME")
         explicit_url = os.getenv("WHATSAPP_SERVICE_URL")
 
         if explicit_url:
+            # Recomendo NÃO colocar porta aqui; deixe só https://seu-app.up.railway.app
             self.baileys_url = explicit_url.rstrip("/")
-        elif railway_environment:
+        elif railway_env:
             self.baileys_url = "http://127.0.0.1:3001"
         else:
             self.baileys_url = "http://localhost:3001"
 
         self.api_token: Optional[str] = os.getenv("WHATSAPP_API_TOKEN") or None
 
-        # timeouts “amigáveis” ao Railway
+        # timeouts mais folgados p/ Railway
         self.short_timeout = int(os.getenv("WHATSAPP_HTTP_TIMEOUT_SHORT", "20"))
         self.long_timeout = int(os.getenv("WHATSAPP_HTTP_TIMEOUT_LONG", "45"))
 
@@ -39,7 +38,7 @@ class WhatsAppService:
 
         logger.info(f"WhatsApp Service initialized with URL: {self.baileys_url}")
 
-    # ------------- helpers HTTP -------------
+    # ---------------- HTTP helper ----------------
 
     def _http(
         self,
@@ -50,12 +49,8 @@ class WhatsAppService:
         timeout: Optional[int] = None,
         allow_404: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Pequeno wrapper HTTP com log e tratamento de erros.
-        """
         url = f"{self.baileys_url}{path}"
         to = timeout or self.short_timeout
-
         try:
             resp = requests.request(
                 method=method.upper(),
@@ -74,35 +69,52 @@ class WhatsAppService:
                     "details": resp.text,
                 }
 
-            # Tenta parsear JSON, caindo para texto se necessário
             try:
                 data = resp.json()
             except ValueError:
                 data = {"raw": resp.text}
 
-            # Normaliza uma flag de sucesso
             if "success" not in data:
                 data["success"] = True
 
             return data
-
         except requests.exceptions.Timeout:
             return {"success": False, "error": "Timeout", "details": f"timeout={to}s"}
         except requests.exceptions.ConnectionError as e:
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e),
-            }
+            return {"success": False, "error": "Connection error", "details": str(e)}
         except Exception as e:
             return {"success": False, "error": "Unexpected error", "details": str(e)}
 
-    # ------------- API principal -------------
+    # ---------------- “Aquecimento” do servidor ----------------
+
+    def _warm_up(self, tries: int = 6, sleep_s: int = 3) -> bool:
+        """
+        Tenta 'acordar' o serviço no Railway:
+        - GET /health (primary)
+        - GET / (fallback)
+        Retorna True se algum responder OK.
+        """
+        for i in range(1, tries + 1):
+            res = self._http("GET", "/health", timeout=self.short_timeout)
+            if res.get("success"):
+                logger.info("Baileys /health OK")
+                return True
+
+            # fallback tenta a raiz
+            res2 = self._http("GET", "/", timeout=self.short_timeout)
+            if res2.get("success"):
+                logger.info("Baileys root OK")
+                return True
+
+            logger.info(f"Aguardando WhatsApp server (tentativa {i}/{tries})…")
+            time.sleep(sleep_s)
+
+        logger.warning("WhatsApp server não respondeu ao aquecimento")
+        return False
+
+    # ---------------- API principal ----------------
 
     def send_message(self, phone_number: str, message: str, user_id: int) -> Dict[str, Any]:
-        """
-        Envia mensagem via /send/:sessionId. Formata número para +55 se necessário.
-        """
         try:
             clean = "".join(filter(str.isdigit, phone_number or ""))
             if not clean:
@@ -113,6 +125,9 @@ class WhatsAppService:
 
             payload = {"number": clean, "message": message}
 
+            # garante que o serviço esteja de pé antes
+            self._warm_up()
+
             res = self._http("POST", f"/send/{user_id}", json_body=payload, timeout=self.long_timeout)
             if res.get("success"):
                 logger.info(f"WhatsApp message sent to {clean}")
@@ -122,25 +137,21 @@ class WhatsAppService:
                     "response": res,
                 }
 
-            # Se falhou por não conectado, tenta restaurar e informa
+            # se falhou por desconexão, tenta restaurar
             err_txt = (res.get("error") or "").lower()
             if "not connected" in err_txt or "não conectado" in err_txt:
                 self.restore_session(user_id)
 
             return res
-
         except Exception as e:
             logger.error(f"Unexpected error sending WhatsApp message: {e}")
             return {"success": False, "error": "Unexpected error", "details": str(e)}
 
     def get_health_status(self) -> Dict[str, Any]:
-        """GET /health"""
         return self._http("GET", "/health")
 
     def check_instance_status(self, user_id: int) -> Dict[str, Any]:
-        """GET /status/:sessionId"""
         res = self._http("GET", f"/status/{user_id}")
-        # Normaliza campos úteis
         if res.get("success", False):
             return {
                 "success": True,
@@ -151,25 +162,17 @@ class WhatsAppService:
             }
         return res
 
-    def restore_session(self, user_id: int) -> Dict[str, Any]:
-        """
-        Restaura sessão pedindo /reconnect/:sessionId.
-        """
-        return self._http("POST", f"/reconnect/{user_id}", timeout=self.long_timeout)
-
     def disconnect_whatsapp(self, user_id: int) -> Dict[str, Any]:
-        """POST /disconnect/:sessionId"""
         return self._http("POST", f"/disconnect/{user_id}")
 
     def reconnect_whatsapp(self, user_id: int) -> Dict[str, Any]:
-        """POST /reconnect/:sessionId"""
         return self._http("POST", f"/reconnect/{user_id}", timeout=self.long_timeout)
 
+    def restore_session(self, user_id: int) -> Dict[str, Any]:
+        # alias simples para reconectar
+        return self.reconnect_whatsapp(user_id)
+
     def request_pairing_code(self, user_id: int, phone_number: str) -> Dict[str, Any]:
-        """
-        POST /pairing-code/:sessionId  { phoneNumber }
-        (se o seu servidor não implementa, retorne erro amigável)
-        """
         payload = {"phoneNumber": phone_number}
         res = self._http(
             "POST",
@@ -179,10 +182,7 @@ class WhatsAppService:
             allow_404=True,
         )
         if res.get("status") == 404:
-            return {
-                "success": False,
-                "error": "pairing-code endpoint not available on server",
-            }
+            return {"success": False, "error": "pairing-code endpoint not available on server"}
         return {
             "success": bool(res.get("success")),
             "pairing_code": res.get("pairingCode") or res.get("code"),
@@ -190,19 +190,12 @@ class WhatsAppService:
         }
 
     def get_pairing_code(self, user_id: int) -> Dict[str, Any]:
-        """GET /pairing-code/:sessionId (se existir)"""
         res = self._http("GET", f"/pairing-code/{user_id}", allow_404=True)
         if res.get("status") == 404:
-            return {
-                "success": False,
-                "error": "pairing-code endpoint not available on server",
-            }
+            return {"success": False, "error": "pairing-code endpoint not available on server"}
         return res
 
     def get_qr_code(self, user_id: int) -> Dict[str, Any]:
-        """
-        Usa /status/:id e extrai qrCode (se houver).
-        """
         status = self.check_instance_status(user_id)
         if status.get("success") and status.get("qrCode"):
             return {
@@ -211,38 +204,51 @@ class WhatsAppService:
                 "connected": status.get("connected", False),
                 "state": status.get("state", "unknown"),
             }
-        return {
-            "success": False,
-            "error": "QR Code not available",
-            "details": status,
-        }
+        return {"success": False, "error": "QR Code not available", "details": status}
 
     def force_new_qr(self, user_id: int) -> Dict[str, Any]:
         """
-        Estratégia robusta (sem /force-qr):
-        1) Tenta desconectar (best-effort).
-        2) Reconecta (/reconnect/:id) para forçar emissão de QR.
-        3) Faz polling de /status/:id por até N segundos esperando `qrCode`.
+        Fluxo robusto sem /force-qr:
+        0) Aquece o servidor (evita 502).
+        1) POST /disconnect/:id (best effort)
+        2) POST /reconnect/:id com até 3 tentativas (backoff)
+        3) Polling /status/:id por até N segundos aguardando qrCode
         """
-        # 1) tenta desconectar (ignora erro)
+        # 0) aquece (tenta “acordar” serviços hibernados do Railway)
+        self._warm_up()
+
+        # 1) desconecta (ignorar erro)
         try:
             self.disconnect_whatsapp(user_id)
         except Exception:
             pass
 
-        # 2) reconectar
-        rec = self.reconnect_whatsapp(user_id)
-        if not rec.get("success"):
+        # 2) reconectar com backoff
+        attempts = 3
+        sleep_s = 2
+        last_err: Optional[Dict[str, Any]] = None
+
+        for i in range(1, attempts + 1):
+            rec = self.reconnect_whatsapp(user_id)
+            if rec.get("success"):
+                break
+            last_err = rec
+            logger.warning(f"reconnect falhou (tentativa {i}/{attempts}): {rec}")
+            time.sleep(sleep_s)
+            sleep_s *= 2  # backoff
+
+        else:
+            # esgotou tentativas
             return {
                 "success": False,
                 "error": "Reconnect failed",
-                "details": rec,
+                "details": last_err or {"reason": "unknown"},
             }
 
-        # 3) polling do status
-        max_wait = int(os.getenv("WHATSAPP_FORCE_QR_TIMEOUT", "30"))
-        interval = 2
+        # 3) polling por qrCode
+        max_wait = int(os.getenv("WHATSAPP_FORCE_QR_TIMEOUT", "40"))
         waited = 0
+        interval = 2
 
         while waited < max_wait:
             status = self.check_instance_status(user_id)
@@ -256,13 +262,9 @@ class WhatsAppService:
             time.sleep(interval)
             waited += interval
 
-        return {
-            "success": False,
-            "error": "QR Code not available after reconnect/polling",
-        }
+        return {"success": False, "error": "QR Code not available after reconnect/polling"}
 
     def format_message(self, template: str, **kwargs) -> str:
-        """Formatador simples de templates .format(**kwargs)"""
         try:
             return template.format(**kwargs)
         except KeyError as e:
@@ -273,5 +275,4 @@ class WhatsAppService:
             return template
 
 
-# Instância global
 whatsapp_service = WhatsAppService()
